@@ -25,6 +25,7 @@ UPSTREAM_REMOTE_OVERRIDE=""
 FORK_REMOTE_OVERRIDE=""
 VERSION_ARG=""
 DRY_RUN=false
+BUILD_TESTED=false
 
 # ── argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -325,7 +326,51 @@ fi
 confirm "The diff looks correct — proceed to commit?"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "Step 13 — Create update branch"
+step "Step 13 — Test the build"
+# ─────────────────────────────────────────────────────────────────────────────
+
+printf "\n${BOLD}%s${RESET} [y/N] " "Run the build test now? (recommended — skipping will leave the PR checkbox unchecked)"
+if [[ "$DRY_RUN" == true ]]; then
+  printf "${YELLOW}[dry-run]${RESET} Would offer build test — skipping.\n"
+else
+  read -r _build_reply
+  if [[ "$_build_reply" =~ ^[Yy] ]]; then
+    # Detect running VSCode instances (process name is 'code' for the standard package)
+    VSCODE_PIDS="$(pgrep -x code 2>/dev/null || true)"
+    if [[ -n "$VSCODE_PIDS" ]]; then
+      warn "Running VSCode instances detected (PIDs: $VSCODE_PIDS)"
+      warn "VSCode must be closed before nix run can launch the freshly built version."
+      printf "\n${BOLD}%s${RESET} [y/N] " "Kill all running VSCode instances?"
+      read -r _kill_reply
+      if [[ "$_kill_reply" =~ ^[Yy] ]]; then
+        pkill -x code && ok "VSCode processes killed." || warn "pkill returned non-zero — processes may already be gone."
+      else
+        warn "Skipping kill — the build test may open alongside an existing instance."
+      fi
+    fi
+
+    info "Launching: NIXPKGS_ALLOW_UNFREE=1 nix run -f . vscode"
+    info "(Close VSCode when you are done testing — the script will resume.)"
+    printf "\n"
+    if NIXPKGS_ALLOW_UNFREE=1 nix run -f . vscode; then
+      printf "\n${BOLD}%s${RESET} [y/N] " "Did VSCode launch and work correctly?"
+      read -r _result_reply
+      if [[ "$_result_reply" =~ ^[Yy] ]]; then
+        BUILD_TESTED=true
+        ok "Build test passed — will check the 'tested basic functionality' box in the PR."
+      else
+        warn "Build test marked as failed — checkbox will remain unchecked."
+      fi
+    else
+      warn "nix run exited with an error — checkbox will remain unchecked."
+    fi
+  else
+    warn "Build test skipped — 'tested basic functionality' checkbox will remain unchecked in the PR."
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "Step 14 — Create update branch"
 # ─────────────────────────────────────────────────────────────────────────────
 
 BRANCH="vscode-${NEW_VERSION}"
@@ -335,7 +380,7 @@ run_cmd git checkout -b "$BRANCH"
 ok "Now on branch: $BRANCH"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "Step 14 — Commit changes"
+step "Step 15 — Commit changes"
 # ─────────────────────────────────────────────────────────────────────────────
 
 COMMIT_MSG="vscode: ${CURRENT_VERSION} -> ${NEW_VERSION}"
@@ -352,14 +397,14 @@ fi
 confirm "Commit looks correct — push branch and create PR?"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "Step 15 — Push branch to fork"
+step "Step 16 — Push branch to fork"
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_cmd git push "$FORK_REMOTE" "$BRANCH"
 ok "Branch pushed to $FORK_REMOTE."
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "Step 16 — Create pull request"
+step "Step 17 — Create pull request"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Build the release notes URL: X.Y.Z → vX_Y
@@ -367,11 +412,13 @@ VERSION_MAJOR="$(echo "$NEW_VERSION" | cut -d. -f1)"
 VERSION_MINOR="$(echo "$NEW_VERSION" | cut -d. -f2)"
 RELEASE_URL="https://code.visualstudio.com/updates/v${VERSION_MAJOR}_${VERSION_MINOR}"
 
+TESTED_MARK="$( [[ "$BUILD_TESTED" == true ]] && echo "x" || echo " " )"
+
 PR_TITLE="vscode: ${CURRENT_VERSION} -> ${NEW_VERSION}"
 PR_BODY="$(cat <<EOF
 ## Things done
 
-Updated to ${NEW_VERSION} - [release notes](${RELEASE_URL})
+Updated to ${NEW_VERSION} - [release notes ](${RELEASE_URL})
 
 <!-- Please check what applies. Note that these are not hard requirements but merely serve as information for reviewers. -->
 
@@ -385,7 +432,7 @@ Updated to ${NEW_VERSION} - [release notes](${RELEASE_URL})
   - [ ] [Package tests] at \`passthru.tests\`.
   - [ ] Tests in [lib/tests] or [pkgs/test] for functions and "core" functionality.
 - [ ] Ran \`nixpkgs-review\` on this PR. See [nixpkgs-review usage].
-- [x] Tested basic functionality of all binary files, usually in \`./result/bin/\`.
+- [${TESTED_MARK}] Tested basic functionality of all binary files, usually in \`./result/bin/\`.
 - Nixpkgs Release Notes
   - [ ] Package update: when the change is major or breaking.
 - NixOS Release Notes
